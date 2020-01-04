@@ -74,8 +74,8 @@ def create_meetup():
 def get_meetup(meetup_id):
     # meetup_info = stuff from DB
     meetup_info = db.session.query(Event).filter_by(event_id=meetup_id).first().__dict__
-    if session["username"] != meetup_info["event_owner"]:
-        del meetup_info["event_participants"]
+    if session["username"] == meetup_info["event_owner"]:
+        meetup_info["event_participants"].append()
     del meetup_info["event_key"]
     del meetup_info['_sa_instance_state']
     return meetup_info
@@ -91,6 +91,7 @@ def invite_participant(meetup_id):
     # in db: name, email, event, response as 'unknown', invite code
     # the client will have to keep track of which invite code = which name and email
     # and verify itself
+    meetup_info["event_participants"] = ""
     db.session.commit()
     return invite_code
 
@@ -114,9 +115,13 @@ def respond_invitation(meetup_id, invite_code):
     name = request.form["name"]
     email = request.form["email"]
     meetup_info = db.session.query(Participants).filter_by(event_id=meetup_id).first()
+    event = db.session.query(Event).filter_by(event_id=meetup_id).first()
     meetup_info.name = name
     meetup_info.email = email
     meetup_info.response = response
+    if response == 0:
+        event.event_participants += name + ","
+
     # these should both be encrypted
     # put that in the database
     
@@ -156,7 +161,7 @@ class Event(db.Model):
     event_name = db.Column(db.String(50), nullable=True)
     event_key = db.Column(db.String, nullable=True)
     invitation_only = db.Column(db.Boolean, nullable=True)
-    event_participants = []
+    event_participants = db.Column(db.String, nullable=True)
 
     def __init__(self, event_id, host, event_address, event_description, event_name, invitation_only, event_key):
         self.event_id = event_id
