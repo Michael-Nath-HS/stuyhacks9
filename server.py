@@ -7,22 +7,34 @@ from sqlalchemy.orm import relationship
 app = Flask(__name__)
 import json
 from pretty_bad_protocol import gnupg
+import random, string
 
-gpg = gnupg.GPG(options=["-n"])
+gpg = gnupg.GPG(binary="/usr/local/bin/gpg", options=["-n"])
 config = json.loads(open("config.json").read())
 app.secret_key = config["secret"]
+
+def random_string():
+    return ''.join([random.choice(string.ascii_lowercase + string.ascii_uppercase + string.digits) for i in range(16)])
 
 @app.route('/api/signup', methods=['POST'])
 def signup():
     username = request.form['username']
+    email = request.form["email"]
+    user = db.session.query(Participants).filter_by(name=username).first()
+    if user is not None:
+        return ("username already exists", 400)
     # check if username exists in database
-    password = generate_password_hash(request.form['password'])
+    password = request.form['password']
+
     # store in database 'users'; possibly implement email verification
+    db.session.add(User(username,email,password))
+    db.session.commit()
     return ("success", 200)
 
 @app.route('/api/login', methods=['POST'])
 def login():
     username = request.form['username']
+    database_password = db.session.query(User).filter_by(name=username).first().password_hash
     # database_password = whatever password we get from the database
     supplied_password = request.form['password']
     if check_password_hash(database_password, supplied_password):
@@ -39,7 +51,8 @@ def create_meetup():
         "name": request.form["name"],
         "address": request.form["address"], # TODO: generate/validate with openstreetmap
         "description": request.form["description"],
-        "key": request.form["key"], 
+        "key": request.form["key"],
+        "private": True if request.form["private"] == "1" else False,
         "participants": str()
     }
     key_result = gpg.import_keys(meetup_info["key"])
@@ -47,40 +60,55 @@ def create_meetup():
         if result["status"] == "Key expired" \
         or result["status"] == "No valid data found":
             return ("invalid key", 400)
+    db.session.add(Event(meetup_info["id"], meetup_info["owner"], meetup_info["address"], meetup_info["description"], meetup_info["name"], meetup_info["private"], meetup_info["key"]))
+    db.session.commit()
 
 @app.route('/api/get_meetup/<meetup_id>', methods=['GET'])
 def get_meetup(meetup_id):
     # meetup_info = stuff from DB
-    if session["username"] != meetup_info["owner"]:
-        del meetup_info["participants"]
-    del meetup_info["key"]
+    meetup_info = db.session.query(Event).filter_by(event_id=meetup_id).first().__dict__
+    if session["username"] != meetup_info["event_owner"]:
+        del meetup_info["event_participants"]
+    del meetup_info["event_key"]
     return meetup_info
 
 @app.route('/api/invite_participant/<meetup_id>', methods=['GET'])
 def invite_participant(meetup_id):
     # meetup_info = stuff from DB
-    if session["username"] != meetup_info["owner"]:
+    meetup_info = db.session.query(Event).filter_by(event_id=meetup_id).first().__dict__
+    if session["username"] != meetup_info["event_owner"]:
         return ("you are not the owner", 403)
     invite_code = random_string()
+    db.session.add(Participants(invite_code, None, None, meetup_id, None))
     # in db: name, email, event, response as 'unknown', invite code
     # the client will have to keep track of which invite code = which name and email
     # and verify itself
+    db.session.commit()
     return invite_code
 
 @app.route('/api/get_invitation/<meetup_id>/<invite_code>', methods=['GET'])
 def get_invitation(meetup_id, invite_code):
-    # check if invite_code valid and not used, and if so
+    meetup_info = db.session.query(Participants).filter_by(event_id=meetup_id).first().__dict__
+    if invite_code != meetup_info["event_code"] or meetup_info["response"] is not None:
         return ("invite code invalid or already used", 400)
+    # check if invite_code valid and not used, and if so
+
     # meetup_info = stuff from DB
-    del meetup_info["participants"]
+    del meetup_info["event_participants"]
     return meetup_info
 
 @app.route('/api/respond_invitation/<meetup_id>/<invite_code>', methods=['POST'])
 def respond_invitation(meetup_id, invite_code):
     response = int(request.form["response"]) # responses = ["Yes", "No", "Maybe"]
     name = request.form["name"]
-    email = request.form["email"] # these should both be encrypted
+    email = request.form["email"]
+    meetup_info = db.session.query(Participants).filter_by(event_id=meetup_id).first()
+    meetup_info.name = name
+    meetup_info.email = email
+    meetup_info.response = response
+    # these should both be encrypted
     # put that in the database
+    
     return ("success", 200)
 
 db = SQLAlchemy(app)
@@ -97,8 +125,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(128))
     ownership = relationship("Event", backref="hosty")
 
-    def __init__(self, id, username, email, password):
-        self.id = id
+    def __init__(self, username, email, password):
         self.username = username
         self.email = email
         self.password_hash = generate_password_hash(password)
@@ -118,10 +145,11 @@ class Event(db.Model):
     event_address = db.Column(db.String(128), nullable=True)
     event_description = db.Column(db.String(250), nullable=True)
     event_name = db.Column(db.String(50), nullable=True)
+    event_key = db.Column(db.String, nullable=True)
     invitation_only = db.Column(db.Boolean, nullable=True)
     event_participants = []
 
-    def __init__(self, id, event_id, host, event_address, event_description, event_name, invitation_only):
+    def __init__(self, id, event_id, host, event_address, event_description, event_name, invitation_only, event_key):
         self.id = id
         self.event_id = event_id
         self.event_owner = host
@@ -129,6 +157,7 @@ class Event(db.Model):
         self.event_description = event_description
         self.event_name = event_name
         self.invitation_only = invitation_only
+        self.event_key = event_key
 
     def __repr__(self):
         return '<Event %r>' % self.event_name
@@ -143,7 +172,7 @@ class Participants(db.Model):
     # participant = relationship("Event", backref="participants", uselist=True)
     event_id = db.Column(db.String, nullable=False)
     email = db.Column(db.String, nullable=False)
-    response = db.Column(db.String, nullable=False)
+    response = db.Column(db.Integer, nullable=False)
 
     def __init__(self, id, event_code, name, email, event_id, response):
         self.id = id
