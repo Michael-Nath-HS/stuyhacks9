@@ -12,7 +12,9 @@ import random, string
 gpg = gnupg.GPG(binary="/usr/local/bin/gpg", options=["-n"])
 config = json.loads(open("config.json").read())
 app.secret_key = config["secret"]
-
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'app.db')
+db = SQLAlchemy(app)
 def random_string():
     return ''.join([random.choice(string.ascii_lowercase + string.ascii_uppercase + string.digits) for i in range(16)])
 
@@ -20,12 +22,11 @@ def random_string():
 def signup():
     username = request.form['username']
     email = request.form["email"]
-    user = db.session.query(Participants).filter_by(name=username).first()
+    user = db.session.query(User).filter_by(username=username).first()
     if user is not None:
         return ("username already exists", 400)
     # check if username exists in database
     password = request.form['password']
-
     # store in database 'users'; possibly implement email verification
     db.session.add(User(username,email,password))
     db.session.commit()
@@ -34,7 +35,10 @@ def signup():
 @app.route('/api/login', methods=['POST'])
 def login():
     username = request.form['username']
-    database_password = db.session.query(User).filter_by(name=username).first().password_hash
+    user = db.session.query(User).filter_by(username=username).first()
+    if user is None:
+        return ("user does not exist", 403)
+    database_password = user.password_hash
     # database_password = whatever password we get from the database
     supplied_password = request.form['password']
     if check_password_hash(database_password, supplied_password):
@@ -45,6 +49,8 @@ def login():
 
 @app.route('/api/create_meetup', methods=['POST'])
 def create_meetup():
+    if "username" not in session:
+        return ("unauthorized")
     meetup_info = {
         "id": random_string(),
         "owner": session["username"],
@@ -62,6 +68,7 @@ def create_meetup():
             return ("invalid key", 400)
     db.session.add(Event(meetup_info["id"], meetup_info["owner"], meetup_info["address"], meetup_info["description"], meetup_info["name"], meetup_info["private"], meetup_info["key"]))
     db.session.commit()
+    return (meetup_info["id"], 200)
 
 @app.route('/api/get_meetup/<meetup_id>', methods=['GET'])
 def get_meetup(meetup_id):
@@ -70,6 +77,7 @@ def get_meetup(meetup_id):
     if session["username"] != meetup_info["event_owner"]:
         del meetup_info["event_participants"]
     del meetup_info["event_key"]
+    del meetup_info['_sa_instance_state']
     return meetup_info
 
 @app.route('/api/invite_participant/<meetup_id>', methods=['GET'])
@@ -88,13 +96,16 @@ def invite_participant(meetup_id):
 
 @app.route('/api/get_invitation/<meetup_id>/<invite_code>', methods=['GET'])
 def get_invitation(meetup_id, invite_code):
-    meetup_info = db.session.query(Participants).filter_by(event_id=meetup_id).first().__dict__
-    if invite_code != meetup_info["event_code"] or meetup_info["response"] is not None:
+    participant = db.session.query(Participants).filter_by(event_code=invite_code).first().__dict__
+    meetup_info = db.session.query(Event).filter_by(event_id=meetup_id).first().__dict__
+    print(meetup_info)
+    if participant is None or participant["response"] is not None:
         return ("invite code invalid or already used", 400)
     # check if invite_code valid and not used, and if so
 
     # meetup_info = stuff from DB
-    del meetup_info["event_participants"]
+    print(meetup_info)
+    del meetup_info['_sa_instance_state']
     return meetup_info
 
 @app.route('/api/respond_invitation/<meetup_id>/<invite_code>', methods=['POST'])
@@ -110,11 +121,9 @@ def respond_invitation(meetup_id, invite_code):
     # put that in the database
     
     return ("success", 200)
+    
 
-db = SQLAlchemy(app)
-basedir = os.path.abspath(os.path.dirname(__file__))
-SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'sqlite:///' + os.path.join(basedir, 'app.db')
+
 
 
 class User(db.Model):
@@ -149,8 +158,7 @@ class Event(db.Model):
     invitation_only = db.Column(db.Boolean, nullable=True)
     event_participants = []
 
-    def __init__(self, id, event_id, host, event_address, event_description, event_name, invitation_only, event_key):
-        self.id = id
+    def __init__(self, event_id, host, event_address, event_description, event_name, invitation_only, event_key):
         self.event_id = event_id
         self.event_owner = host
         self.event_address = event_address
@@ -168,14 +176,13 @@ class Participants(db.Model):
     __tablename__ = "table_participants"
     id = db.Column(db.Integer, primary_key=True)
     event_code = db.Column(db.String(16), nullable=True)
-    name = db.Column(db.String, unique=True, nullable=False)
+    name = db.Column(db.String, unique=True, nullable=True)
     # participant = relationship("Event", backref="participants", uselist=True)
     event_id = db.Column(db.String, nullable=False)
-    email = db.Column(db.String, nullable=False)
-    response = db.Column(db.Integer, nullable=False)
+    email = db.Column(db.String, nullable=True)
+    response = db.Column(db.Integer, nullable=True)
 
-    def __init__(self, id, event_code, name, email, event_id, response):
-        self.id = id
+    def __init__(self, event_code, name, email, event_id, response):
         self.event_code = event_code
         self.name = name
         self.email = email
@@ -184,3 +191,5 @@ class Participants(db.Model):
 
     def __repr__(self):
         return '<Participants %r>' % self.name
+db.create_all()
+app.run()
