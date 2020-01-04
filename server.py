@@ -4,7 +4,9 @@ imort string
 from werkzeug.security import generate_password_hash, check_password_hash
 app = Flask(__name__)
 import json
+from pretty_bad_protocol import gnupg
 
+gpg = gnupg.GPG(options=["-n"])
 config = json.loads(open("config.json").read())
 app.secret_key = config["secret"]
 
@@ -34,10 +36,49 @@ def login():
 def create_meetup():
     meetup_info = {
         "id": random_string(),
+        "owner": session["username"],
         "name": request.form["name"],
         "address": request.form["address"], # TODO: generate/validate with openstreetmap
         "description": request.form["description"],
-        "key": request.form["key"], # TODO: validate with gnupg
-        "participants": []
+        "key": request.form["key"], 
+        "participants": str()
     }
-    
+    key_result = gpg.import_keys(meetup_info["key"])
+    for result in key_result.results:
+        if result["status"] == "Key expired" \
+        or result["status"] == "No valid data found":
+            return ("invalid key", 400)
+
+@app.route('/api/get_meetup/<meetup_id>', methods=['GET'])
+def get_meetup(meetup_id):
+    # meetup_info = stuff from DB
+    if session["username"] != meetup_info["owner"]:
+        del meetup_info["participants"]
+    return meetup_info
+
+@app.route('/api/invite_participant/<meetup_id>', methods=['GET'])
+def invite_participant(meetup_id):
+    # meetup_info = stuff from DB
+    if session["username"] != meetup_info["owner"]:
+        return ("you are not the owner", 403)
+    invite_code = random_string()
+    # in db: name, email, event, response as 'unknown', invite code
+    # the client will have to keep track of which invite code = which name and email
+    # and verify itself
+    return invite_code
+
+@app.route('/api/get_invitation/<meetup_id>/<invite_code>', methods=['GET'])
+def get_invitation(meetup_id, invite_code):
+    # check if invite_code valid and not used, and if so
+        return ("invite code invalid or already used", 400)
+    # meetup_info = stuff from DB
+    del meetup_info["participants"]
+    return meetup_info
+
+@app.route('/api/respond_invitation/<meetup_id>/<invite_code>', methods=['POST'])
+def respond_invitation(meetup_id, invite_code):
+    response = int(request.form["response"]) # responses = ["Yes", "No", "Maybe"]
+    name = request.form["name"]
+    email = request.form["email"] # these should both be encrypted
+    # put that in the database
+    return ("success", 200)
